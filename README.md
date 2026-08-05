@@ -35,6 +35,13 @@ The app remembers your choices for next time.
   it still works, just slower.
 - Long recordings take a while. The progress bar shows where it is at.
 
+## If the site does not work for you
+
+There is a command line fallback in transcribe.py that does the same job
+with Python instead of the browser. It is also the better tool for very
+long recordings. Open the file - the comments at the top explain what to
+install and how to run it.
+
 ## Running it locally
 
 No build step. Clone the repo and serve the folder with any static file
