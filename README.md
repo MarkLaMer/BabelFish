@@ -1,7 +1,6 @@
 # Babel Fish
 
-Speech to text that runs entirely in your browser. Nothing gets uploaded
-anywhere - the audio is processed on your own machine using OpenAI Whisper
+Speech to text that runs entirely in your browser. The audio is processed on your own machine using OpenAI Whisper
 via Transformers.js.
 
 Try it here: https://marklamer.github.io/BabelFish/
@@ -10,7 +9,7 @@ Try it here: https://marklamer.github.io/BabelFish/
 
 1. Open the page and give it a moment. The badge in the corner says
    "preparing model" while it downloads the speech model, and "model ready"
-   when it is good to go. This download only happens once - after that the
+   when it is good to go. This download only happens once. After that the
    browser keeps it cached.
 2. Drop an audio file onto the big dashed box, or click it to browse.
    Most formats work: m4a, mp3, wav, ogg, flac, mp4.
@@ -30,8 +29,6 @@ The app remembers your choices for next time.
 
 ## Good to know
 
-- Your audio never leaves your device. The only things downloaded are the
-  app itself and the model files, and those come in, not out.
 - First visit needs internet for the model download. After that,
   transcription works offline.
 - If the badge says GPU (WebGPU) things will be fast. If it says CPU (WASM)
