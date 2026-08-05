@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Babel Fish</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="masthead">
+    <img src="babel_fish_cropped.jpg" alt="Babel Fish logo" class="logo">
+    <div>
+      <h1>Babel Fish</h1>
+      <p class="subtitle">Speech-to-text that runs entirely in your browser. Your audio never leaves this device. The first run downloads the model, after that it is cached. Could come in handy when encountering a party of Vogons. </p>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Choose an audio file to transcribe">
+      <div class="big">Drop an audio file here or click to browse</div>
+      <div class="small">m4a, mp3, wav, ogg, flac, mp4 and most other formats</div>
+    </div>
+    <input type="file" id="fileInput" accept="audio/*,video/mp4,.m4a" class="hidden">
+    <div class="options">
+      <label>Model
+        <select id="modelSelect">
+          <option value="onnx-community/whisper-tiny">Tiny (fastest, ~40 MB)</option>
+          <option value="onnx-community/whisper-base" selected>Base (balanced, ~80 MB)</option>
+          <option value="onnx-community/whisper-small">Small (best quality, ~250 MB)</option>
+        </select>
+      </label>
+      <label>Language
+        <select id="langSelect">
+          <option value="auto" selected>Auto-detect</option>
+          <option value="en">English</option>
+          <option value="ar">Arabic</option>
+          <option value="zh">Chinese</option>
+          <option value="cs">Czech</option>
+          <option value="da">Danish</option>
+          <option value="nl">Dutch</option>
+          <option value="fi">Finnish</option>
+          <option value="fr">French</option>
+          <option value="de">German</option>
+          <option value="el">Greek</option>
+          <option value="hi">Hindi</option>
+          <option value="hu">Hungarian</option>
+          <option value="it">Italian</option>
+          <option value="ja">Japanese</option>
+          <option value="ko">Korean</option>
+          <option value="no">Norwegian</option>
+          <option value="pl">Polish</option>
+          <option value="pt">Portuguese</option>
+          <option value="ro">Romanian</option>
+          <option value="ru">Russian</option>
+          <option value="es">Spanish</option>
+          <option value="sv">Swedish</option>
+          <option value="tr">Turkish</option>
+          <option value="uk">Ukrainian</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="tsToggle"> Include timestamps</label>
+      <span class="badge" id="deviceBadge" title="Compute backend">detecting backend…</span>
+    </div>
+  </div>
+
+  <div class="card hidden" id="progressCard">
+    <div class="status-line" aria-live="polite">
+      <div class="spinner" id="spinner"></div>
+      <span id="statusText">Preparing…</span>
+    </div>
+    <div class="bar-outer"><div class="bar-inner" id="mainBar"></div></div>
+    <div id="fileRows"></div>
+    <div class="error hidden" id="errorBox" role="alert"></div>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <textarea id="transcript" spellcheck="false" aria-label="Transcript" placeholder="Transcript will appear here…"></textarea>
+    <div class="btn-row">
+      <button class="primary" id="downloadBtn">Download .txt</button>
+      <button id="copyBtn">Copy</button>
+      <button id="resetBtn">New transcription</button>
+    </div>
+  </div>
+
+  <footer>
+    Powered by <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noopener">Transformers.js</a> and OpenAI Whisper (ONNX). All processing is local: nothing is uploaded to any server.
+  </footer>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
