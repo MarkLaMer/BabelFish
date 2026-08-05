@@ -34,6 +34,9 @@ The app remembers your choices for next time.
 - If the badge says GPU (WebGPU) things will be fast. If it says CPU (WASM)
   it still works, just slower.
 - Long recordings take a while. The progress bar shows where it is at.
+- On a phone the app starts with the Tiny model, since bigger models can
+  run out of memory in mobile browsers. If a model still crashes the page,
+  the next visit automatically retries with the lightest settings.
 
 ## If the site does not work for you
 

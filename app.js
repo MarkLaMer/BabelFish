@@ -19,7 +19,8 @@ function friendlyError(err) {
   return message;
 }
 
-async function detectDevice() {
+async function detectDevice(forced) {
+  if (forced) return forced;
   try {
     if (self.navigator && self.navigator.gpu) {
       const adapter = await self.navigator.gpu.requestAdapter();
@@ -29,7 +30,7 @@ async function detectDevice() {
   return "wasm";
 }
 
-async function loadModel(model) {
+async function loadModel(model, forcedDevice) {
   const progress_callback = (p) => {
     if (p && p.status === "progress") {
       post({ type: "model-progress", file: p.file, progress: p.progress || 0, loaded: p.loaded, total: p.total });
@@ -37,10 +38,12 @@ async function loadModel(model) {
       post({ type: "model-file", file: p.file });
     }
   };
-  let device = await detectDevice();
+  let device = await detectDevice(forcedDevice);
   const opts = (dev) => ({
     device: dev,
-    dtype: dev === "webgpu" ? { encoder_model: "fp32", decoder_model_merged: "q4" } : "q8",
+    // Note: "q8" (and the library default) fail session creation on wasm with
+    // this transformers.js version; "q4" works and is lighter on memory too.
+    dtype: dev === "webgpu" ? { encoder_model: "fp32", decoder_model_merged: "q4" } : "q4",
     progress_callback,
   });
   try {
@@ -57,10 +60,10 @@ async function loadModel(model) {
   currentDevice = device;
 }
 
-async function ensureModel(model) {
+async function ensureModel(model, forcedDevice) {
   if (!transcriber || currentModel !== model) {
     transcriber = null;
-    await loadModel(model);
+    await loadModel(model, forcedDevice);
   }
 }
 
@@ -70,7 +73,7 @@ async function handle(data) {
   if (data.type === "load") {
     // Background warm-up: load the model without transcribing anything.
     try {
-      await ensureModel(data.model);
+      await ensureModel(data.model, data.device);
       post({ type: "load-done", device: currentDevice });
     } catch (err) {
       post({ type: "load-error", message: friendlyError(err) });
@@ -78,11 +81,11 @@ async function handle(data) {
     return;
   }
 
-  const { audio, model, duration, language } = data;
+  const { audio, model, duration, language, device } = data;
   try {
     if (!transcriber || currentModel !== model) {
       post({ type: "status", text: "Loading model (first time only)…" });
-      await ensureModel(model);
+      await ensureModel(model, device);
     }
     post({ type: "ready", device: currentDevice });
 
@@ -130,6 +133,30 @@ self.onmessage = (e) => {
 
   const MAX_FILE_BYTES = 750 * 1024 * 1024;
   const PREFS_KEY = "babelfish-prefs";
+  const CRASH_KEY = "babelfish-init-pending";
+  const TINY_MODEL = "onnx-community/whisper-tiny";
+
+  // Crash-loop protection: CRASH_KEY is set just before model initialization
+  // and cleared when init succeeds, fails with a catchable error, or the page
+  // closes normally. If it is still set on startup, the last visit hard-crashed
+  // the tab during init (usually an out-of-memory kill on phones), so this
+  // visit falls back to the lightest settings: Tiny model on CPU.
+  let safeMode = false;
+  try {
+    if (localStorage.getItem(CRASH_KEY)) {
+      safeMode = true;
+      localStorage.removeItem(CRASH_KEY);
+    }
+  } catch (e) {}
+  const setCrashMarker = () => { try { localStorage.setItem(CRASH_KEY, "1"); } catch (e) {} };
+  const clearCrashMarker = () => { try { localStorage.removeItem(CRASH_KEY); } catch (e) {} };
+  addEventListener("pagehide", clearCrashMarker);
+
+  // Phones get the Tiny model by default: bigger models can exceed a mobile
+  // browser tab's memory limit while initializing. (iPads report as Mac, so
+  // also check for real multi-touch.)
+  const isMobile = /Android|iPhone|iPod/i.test(navigator.userAgent) ||
+    (navigator.maxTouchPoints > 1 && /Mac|iPad/i.test(navigator.userAgent));
 
   let worker = null;
   let busy = false;
@@ -166,7 +193,12 @@ self.onmessage = (e) => {
     setIfValid($("modelSelect"), p.model);
     setIfValid($("langSelect"), p.language);
     if (typeof p.timestamps === "boolean") $("tsToggle").checked = p.timestamps;
+    if (p.model == null && isMobile) $("modelSelect").value = TINY_MODEL;
   })();
+  if (safeMode) {
+    $("modelSelect").value = TINY_MODEL;
+    modelStatus.title = "The last visit crashed while starting the model, so the lightest settings (Tiny model on CPU) are being used";
+  }
   $("langSelect").addEventListener("change", savePrefs);
   $("modelSelect").addEventListener("change", () => {
     savePrefs();
@@ -175,6 +207,7 @@ self.onmessage = (e) => {
 
   // WebGPU badge (informational; the worker does its own detection)
   (async () => {
+    if (safeMode) { deviceBadge.textContent = "CPU (WASM)"; return; }
     let label = "CPU (WASM)";
     try {
       if (navigator.gpu && await navigator.gpu.requestAdapter()) label = "GPU (WebGPU)";
@@ -205,8 +238,12 @@ self.onmessage = (e) => {
 
   function startModelLoad() {
     loadJob = ++jobCounter;
-    modelStatus.textContent = "preparing model…";
-    getWorker().postMessage({ type: "load", id: loadJob, model: $("modelSelect").value });
+    modelStatus.textContent = safeMode ? "preparing model (safe mode)…" : "preparing model…";
+    setCrashMarker();
+    getWorker().postMessage({
+      type: "load", id: loadJob, model: $("modelSelect").value,
+      device: safeMode ? "wasm" : undefined,
+    });
   }
 
   function fmtTime(s) {
@@ -283,7 +320,8 @@ self.onmessage = (e) => {
         break;
       }
       case "load-done":
-        modelStatus.textContent = "model ready";
+        clearCrashMarker();
+        modelStatus.textContent = safeMode ? "model ready (safe mode)" : "model ready";
         deviceBadge.textContent = m.device === "webgpu" ? "GPU (WebGPU)" : "CPU (WASM)";
         if (!busy) {
           fileRows.innerHTML = "";
@@ -292,6 +330,7 @@ self.onmessage = (e) => {
         }
         break;
       case "load-error":
+        clearCrashMarker(); // the page survived, so this was not a crash
         modelStatus.textContent = "model load failed";
         if (busy) showError(m.message);
         break;
@@ -317,8 +356,9 @@ self.onmessage = (e) => {
         break;
       }
       case "ready":
+        clearCrashMarker();
         deviceBadge.textContent = m.device === "webgpu" ? "GPU (WebGPU)" : "CPU (WASM)";
-        modelStatus.textContent = "model ready";
+        modelStatus.textContent = safeMode ? "model ready (safe mode)" : "model ready";
         statusText.textContent = "Transcribing…";
         fileRows.innerHTML = "";
         fileBars.clear();
@@ -347,6 +387,7 @@ self.onmessage = (e) => {
         break;
       }
       case "error":
+        clearCrashMarker(); // the page survived, so this was not a crash
         showError(m.message);
         break;
     }
@@ -410,7 +451,11 @@ self.onmessage = (e) => {
       statusText.textContent = "Starting…";
       const model = $("modelSelect").value;
       const language = $("langSelect").value;
-      getWorker().postMessage({ type: "transcribe", id: currentJob, audio, model, duration: audioDuration, language }, [audio.buffer]);
+      setCrashMarker(); // the worker may still need to init the model for this job
+      getWorker().postMessage({
+        type: "transcribe", id: currentJob, audio, model, duration: audioDuration, language,
+        device: safeMode ? "wasm" : undefined,
+      }, [audio.buffer]);
     } catch (err) {
       showError("Could not decode this file as audio (" + (err.message || err) + "). Try converting it to mp3 or wav.");
     }
