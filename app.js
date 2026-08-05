@@ -11,6 +11,14 @@ let jobId = null;
 
 const post = (msg) => self.postMessage(Object.assign({ id: jobId }, msg));
 
+function friendlyError(err) {
+  let message = (err && err.message) ? err.message : String(err);
+  if (/fetch|network|Failed to load/i.test(message)) {
+    message = "Model download failed (" + message + "). Check your internet connection and reload. The model only needs to download once.";
+  }
+  return message;
+}
+
 async function detectDevice() {
   try {
     if (self.navigator && self.navigator.gpu) {
@@ -49,14 +57,32 @@ async function loadModel(model) {
   currentDevice = device;
 }
 
-self.onmessage = async (e) => {
-  const { audio, model, duration, language } = e.data;
-  jobId = e.data.id;
+async function ensureModel(model) {
+  if (!transcriber || currentModel !== model) {
+    transcriber = null;
+    await loadModel(model);
+  }
+}
+
+async function handle(data) {
+  jobId = data.id;
+
+  if (data.type === "load") {
+    // Background warm-up: load the model without transcribing anything.
+    try {
+      await ensureModel(data.model);
+      post({ type: "load-done", device: currentDevice });
+    } catch (err) {
+      post({ type: "load-error", message: friendlyError(err) });
+    }
+    return;
+  }
+
+  const { audio, model, duration, language } = data;
   try {
     if (!transcriber || currentModel !== model) {
-      transcriber = null;
       post({ type: "status", text: "Loading model (first time only)…" });
-      await loadModel(model);
+      await ensureModel(model);
     }
     post({ type: "ready", device: currentDevice });
 
@@ -81,12 +107,15 @@ self.onmessage = async (e) => {
 
     post({ type: "done", text: output.text, chunks: output.chunks || [] });
   } catch (err) {
-    let message = (err && err.message) ? err.message : String(err);
-    if (/fetch|network|Failed to load/i.test(message)) {
-      message = "Model download failed (" + message + "). Check your internet connection and reload. The model only needs to download once.";
-    }
-    post({ type: "error", message });
+    post({ type: "error", message: friendlyError(err) });
   }
+}
+
+// Serialize message handling: a transcription dropped while a warm-up load is
+// still running queues behind it instead of racing it.
+let queue = Promise.resolve();
+self.onmessage = (e) => {
+  queue = queue.then(() => handle(e.data)).catch(() => {});
 };
 `;
 
@@ -97,7 +126,7 @@ self.onmessage = async (e) => {
         statusText = $("statusText"), mainBar = $("mainBar"),
         fileRows = $("fileRows"), errorBox = $("errorBox"),
         transcript = $("transcript"), spinner = $("spinner"),
-        deviceBadge = $("deviceBadge");
+        deviceBadge = $("deviceBadge"), modelStatus = $("modelStatus");
 
   const MAX_FILE_BYTES = 750 * 1024 * 1024;
   const PREFS_KEY = "babelfish-prefs";
@@ -108,9 +137,11 @@ self.onmessage = async (e) => {
   let audioDuration = 0;
   let doneChunks = null;
   let baseName = "transcript";
-  // Incremented for every job and on reset; the worker echoes it back on each
-  // message so output from a cancelled/stale job can't repopulate the UI.
-  let currentJob = 0;
+  // Every worker request gets a fresh id, echoed back on each of its messages,
+  // so output from a cancelled/stale request can't repopulate the UI.
+  let jobCounter = 0;
+  let currentJob = 0; // the active transcription
+  let loadJob = 0;    // the active background model warm-up
   const fileBars = new Map();
 
   // Remember model / language / timestamp choices across visits.
@@ -136,7 +167,11 @@ self.onmessage = async (e) => {
     setIfValid($("langSelect"), p.language);
     if (typeof p.timestamps === "boolean") $("tsToggle").checked = p.timestamps;
   })();
-  ["modelSelect", "langSelect"].forEach((id) => $(id).addEventListener("change", savePrefs));
+  $("langSelect").addEventListener("change", savePrefs);
+  $("modelSelect").addEventListener("change", () => {
+    savePrefs();
+    startModelLoad(); // warm up the newly selected model right away
+  });
 
   // WebGPU badge (informational; the worker does its own detection)
   (async () => {
@@ -152,10 +187,12 @@ self.onmessage = async (e) => {
     const blob = new Blob([WORKER_SOURCE], { type: "text/javascript" });
     worker = new Worker(URL.createObjectURL(blob), { type: "module" });
     worker.onmessage = onWorkerMessage;
-    worker.onerror = (e) => showError(
-      "The transcription engine failed to start" + (e.message ? " (" + e.message + ")" : "") +
-      ". It loads from a CDN on first use, so check your internet connection and reload the page."
-    );
+    worker.onerror = (e) => {
+      const msg = "The transcription engine failed to start" + (e.message ? " (" + e.message + ")" : "") +
+        ". It loads from a CDN on first use, so check your internet connection and reload the page.";
+      if (busy) showError(msg);
+      else modelStatus.textContent = "engine offline — check connection";
+    };
     return worker;
   }
 
@@ -164,6 +201,12 @@ self.onmessage = async (e) => {
       worker.terminate();
       worker = null;
     }
+  }
+
+  function startModelLoad() {
+    loadJob = ++jobCounter;
+    modelStatus.textContent = "preparing model…";
+    getWorker().postMessage({ type: "load", id: loadJob, model: $("modelSelect").value });
   }
 
   function fmtTime(s) {
@@ -201,38 +244,81 @@ self.onmessage = async (e) => {
     busy = false;
   }
 
+  function addFileRow(file) {
+    if (fileBars.has(file)) return;
+    const row = document.createElement("div");
+    row.className = "file-row";
+    const name = document.createElement("span");
+    name.textContent = file;
+    const pct = document.createElement("span");
+    pct.textContent = "0%";
+    row.append(name, pct);
+    fileRows.appendChild(row);
+    fileBars.set(file, pct);
+  }
+
+  function overallPct() {
+    let sum = 0;
+    fileBars.forEach((span) => { sum += parseFloat(span.textContent) || 0; });
+    return sum / Math.max(1, fileBars.size);
+  }
+
+  // Messages from a background warm-up load
+  function onLoadMessage(m) {
+    switch (m.type) {
+      case "model-file":
+        addFileRow(m.file);
+        break;
+      case "model-progress": {
+        addFileRow(m.file); // recreate if a reset cleared the rows mid-download
+        fileBars.get(m.file).textContent =
+          Math.round(m.progress) + "%" + (m.total ? " of " + fmtBytes(m.total) : "");
+        const pct = overallPct();
+        modelStatus.textContent = "preparing model… " + Math.round(pct) + "%";
+        // A file was dropped while the model is still warming up: show progress there too
+        if (busy) {
+          mainBar.style.width = pct + "%";
+          statusText.textContent = "Loading model (first time only)…";
+        }
+        break;
+      }
+      case "load-done":
+        modelStatus.textContent = "model ready";
+        deviceBadge.textContent = m.device === "webgpu" ? "GPU (WebGPU)" : "CPU (WASM)";
+        if (!busy) {
+          fileRows.innerHTML = "";
+          fileBars.clear();
+          mainBar.style.width = "0%";
+        }
+        break;
+      case "load-error":
+        modelStatus.textContent = "model load failed";
+        if (busy) showError(m.message);
+        break;
+    }
+  }
+
   function onWorkerMessage(e) {
     const m = e.data;
-    if (m.id != null && m.id !== currentJob) return; // stale job: ignore
+    if (m.id === loadJob) { onLoadMessage(m); return; }
+    if (m.id !== currentJob) return; // stale job: ignore
     switch (m.type) {
       case "status":
         statusText.textContent = m.text;
         break;
-      case "model-file": {
-        if (!fileBars.has(m.file)) {
-          const row = document.createElement("div");
-          row.className = "file-row";
-          const name = document.createElement("span");
-          name.textContent = m.file;
-          const pct = document.createElement("span");
-          pct.textContent = "0%";
-          row.append(name, pct);
-          fileRows.appendChild(row);
-          fileBars.set(m.file, pct);
-        }
+      case "model-file":
+        addFileRow(m.file);
         break;
-      }
       case "model-progress": {
-        const el = fileBars.get(m.file);
-        if (el) el.textContent = Math.round(m.progress) + "%" + (m.total ? " of " + fmtBytes(m.total) : "");
-        // Rough overall model bar: average of all files seen
-        let sum = 0;
-        fileBars.forEach((span) => { sum += parseFloat(span.textContent) || 0; });
-        mainBar.style.width = (sum / Math.max(1, fileBars.size)) + "%";
+        addFileRow(m.file);
+        fileBars.get(m.file).textContent =
+          Math.round(m.progress) + "%" + (m.total ? " of " + fmtBytes(m.total) : "");
+        mainBar.style.width = overallPct() + "%";
         break;
       }
       case "ready":
         deviceBadge.textContent = m.device === "webgpu" ? "GPU (WebGPU)" : "CPU (WASM)";
+        modelStatus.textContent = "model ready";
         statusText.textContent = "Transcribing…";
         fileRows.innerHTML = "";
         fileBars.clear();
@@ -315,7 +401,7 @@ self.onmessage = async (e) => {
       return;
     }
     busy = true;
-    currentJob++;
+    currentJob = ++jobCounter;
     baseName = (file.name || "transcript").replace(/\.[^.]+$/, "");
     progressCard.classList.remove("hidden");
     statusText.textContent = "Decoding audio…";
@@ -324,7 +410,7 @@ self.onmessage = async (e) => {
       statusText.textContent = "Starting…";
       const model = $("modelSelect").value;
       const language = $("langSelect").value;
-      getWorker().postMessage({ id: currentJob, audio, model, duration: audioDuration, language }, [audio.buffer]);
+      getWorker().postMessage({ type: "transcribe", id: currentJob, audio, model, duration: audioDuration, language }, [audio.buffer]);
     } catch (err) {
       showError("Could not decode this file as audio (" + (err.message || err) + "). Try converting it to mp3 or wav.");
     }
@@ -385,11 +471,18 @@ self.onmessage = async (e) => {
     URL.revokeObjectURL(a.href);
   });
   $("resetBtn").addEventListener("click", () => {
-    // Mid-job reset is a cancel: kill the worker so it stops burning CPU.
-    // (The model re-downloads from browser cache on the next run, so this is cheap.)
-    if (busy) stopWorker();
-    currentJob++;
+    // Mid-job reset is a cancel: kill the worker so it stops burning CPU,
+    // then start re-warming the model in the background (from browser cache).
+    const wasBusy = busy;
+    currentJob = ++jobCounter;
     resetUI();
     fileInput.value = "";
+    if (wasBusy) {
+      stopWorker();
+      startModelLoad();
+    }
   });
+
+  // Warm up the selected model immediately so it's ready by the time a file lands.
+  startModelLoad();
 })();
